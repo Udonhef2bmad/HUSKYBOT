@@ -4,65 +4,89 @@
 #include "HW_motor.h"
 #include "DifferentialDrive.h"
 
+#include "timer.h"
+#include "PID.h"
+
 #include "husklens_utils.h"
 
-// Misc
+/// tweakable values
 
+long lost_timeout_delay = 200; // timeout delay after target is lost (ms)
+
+int16_t target_height = 130;          // target height; determines how close to the object the robot has to stop
+int16_t target_height_margin = 50; // allows for a certain range of inaccuracy when approaching the target
+
+// reaching
+//PID angular_PID = PID(.5, 0, 0);
+//PID linear_PID = PID(1.2, 0, 0);
+ 
+//PID angular_PID = PID(.05, 0, 0);
+//PID linear_PID = PID(.8, 0, 0);
+
+PID angular_PID = PID(.04, 0, 0);
+PID linear_PID = PID(1, 0, 0);
+
+//PID angular_PID = PID(.02, 0, 2);//save1
+//PID linear_PID = PID(1, 0, 0);
+
+double angular_range = 255; //
+double linear_range = 255;  //
+
+// scanning
+long inactive_time = 1000; // time for camera stabilisation
+// long active_time = 140;    // time to turn : 5V
+long active_time = 150; // time to turn : 12V
+
+//double active_scan_speed = 0;
+double active_scan_speed = .3; //angular speed during active scan turn
+
+int last_tag = 5; // tag that indicates race end
+
+// motor config
+
+double left_motor_coef = 1;  // left motor coefficient : 12V
+double right_motor_coef = 1; // right motor coefficient : 12V
+
+// test config
+// Dir_config(min, max, coef, threshold);
+/*Dir_config config_pos_left =  Dir_config(0, .5, left_motor_coef, 0);
+Dir_config config_neg_left =  Dir_config(0, .5, left_motor_coef, 0);
+Dir_config config_pos_right = Dir_config(0, .5, right_motor_coef, 0);
+Dir_config config_neg_right = Dir_config(0, .5, right_motor_coef, 0);//*/
+
+// 5V config
+// Dir_config(min, max, coef, threshold);
+Dir_config config_pos_left =  Dir_config(0, 1, left_motor_coef, 0);
+Dir_config config_neg_left =  Dir_config(0, 1, left_motor_coef, 0);
+Dir_config config_pos_right = Dir_config(0, 1, right_motor_coef, 0);
+Dir_config config_neg_right = Dir_config(0, 1, right_motor_coef, 0);
+
+// 12V config
+// Dir_config(min, max, coef, threshold);
+ //Dir_config config_pos_left = Dir_config(0, 1.0, left_motor_coef, 0);
+ //Dir_config config_neg_left = Dir_config(0, 1.0, left_motor_coef, 0);
+ //Dir_config config_pos_right = Dir_config(0.20, 1.0, right_motor_coef, 0);
+ //Dir_config config_neg_right = Dir_config(0.20, 1.0, right_motor_coef, 0);
+
+/// Misc
+
+// buzzes when checkpoint is reached
+HW_pwm waypoint_buzzer = HW_pwm(2, 3, 16, 50); // apparently tone doesn't exist on the esp, so we are using a pwm pin.
 int16_t xCenter = 160;
 
 HUSKYLENS huskylens;
 HUSKYLENSResult result;
 
 // Differential drive initialisations
-HW_pwm pwm1 = HW_pwm(25, 1, 16, 50);
-HW_motor motor1 = HW_motor(32, 33, pwm1);
+HW_pwm pwm1 = HW_pwm(25, 1, 8, 40);
+HW_motor motor1 = HW_motor(32, 33, pwm1, config_pos_left, config_neg_left); // left motor
 
-HW_pwm pwm2 = HW_pwm(14, 2, 16, 50);
-HW_motor motor2 = HW_motor(26, 27, pwm2);
+HW_pwm pwm2 = HW_pwm(14, 4, 8, 40);//pwm channel 2 seems damaged?
+HW_motor motor2 = HW_motor(26, 27, pwm2, config_pos_right, config_neg_right); // right motor
 
 DifferentialDrive dfDrive = DifferentialDrive(motor1, motor2);
 
-// Timer
-struct Timer
-{
-    unsigned long start;
-    unsigned long delay;
-};
-
-void set_timer_start(struct Timer *timer)
-{
-    (*timer).start = millis();
-}
-
-void set_timer_delay(struct Timer *timer, unsigned long delay)
-{
-    (*timer).delay = delay;
-}
-
-long elapsed_time(struct Timer timer)
-{
-    return (millis() - timer.start);
-}
-
-long remaining_time(struct Timer timer)
-{
-    // Serial.println(F("millis() : timer.start"));
-    // Serial.print(millis());
-    // Serial.print(F(" : "));
-    // Serial.println(timer.start);
-    return (timer.delay - elapsed_time(timer));
-}
-
-bool hasDelayPassed(struct Timer timer)
-{
-    if (millis() - timer.start >= timer.delay)
-    {
-        return true;
-    }
-    return false;
-}
-
-// States
+/// States
 enum State
 {
     RACE_INIT,
@@ -74,42 +98,57 @@ enum State
 };
 enum State state;
 
-// maps a value from a given range to another - Credit: https://stackoverflow.com/questions/5731863
-double d_map(double input_min, double input_max, double output_min, double output_max, double val)
+// returns +1 if positive of -1 if negative
+double getSign(double value)
 {
-    double slope = (output_max - output_min) / (input_max - input_min); // slope isn't affected by val and can be stored to avoid redundant calculations, see map_get_slope and map_slope
-    return output_min + slope * (val - input_min);
+    if (value > 0)
+    {
+        return 1;
+    }
+    return -1;
 }
 
-//
-int16_t target_height = 100;
-void advance(HUSKYLENSResult result)
+int16_t get_angular_error(HUSKYLENSResult result)
 {
-    bool debug = 0;
+    return (result.xCenter - xCenter);
+}
 
-    double coef_angular = 2; // perfect
-    double coef_linear = 5;  // tweakable
-
-    double angular = coef_angular * (result.xCenter - xCenter);
-    double linear = coef_linear * (target_height - result.height);
+int16_t get_linear_error(HUSKYLENSResult result)
+{
+    return (target_height - result.height);
+}
+void update_move(int16_t angular_error, int16_t linear_error)
+{
+    bool debug = 1;
 
     if (debug)
     {
-        Serial.println(F("linear1 : angular1"));
+        Serial.println(F("\n\nError"));
+        Serial.print(linear_error);
+        Serial.print(F(" : "));
+        Serial.println(angular_error);
+    }
+
+    double linear = linear_PID.getOutput(-linear_error);
+    double angular = angular_PID.getOutput(-angular_error);
+
+    // double linear = 0;
+    // double angular = .005 * pow(angular_error,2) * getSign(angular_error);
+
+    if (debug)
+    {
+        Serial.println(F("PID"));
         Serial.print(linear);
         Serial.print(F(" : "));
         Serial.println(angular);
     }
-
-    double angular_range = 255;
-    double linear_range = 255;
 
     angular = range_cut(angular, -angular_range, angular_range);
     linear = range_cut(linear, -linear_range, linear_range);
 
     if (debug)
     {
-        Serial.println(F("linear2 : angular2"));
+        Serial.println(F("Cut"));
         Serial.print(linear);
         Serial.print(F(" : "));
         Serial.println(angular);
@@ -121,22 +160,21 @@ void advance(HUSKYLENSResult result)
 
     if (debug)
     {
-        Serial.println(F("linear3 : angular3"));
+        Serial.println(F("Map"));
         Serial.print(linear);
         Serial.print(F(" : "));
         Serial.println(angular);
     }
 
     dfDrive.control(linear, angular);
+    delay(100);
 }
 
 int target_tag;
 void race_init() // swap algorithm mode
 {
-    Serial.println(F("RACE_INIT"));
-
     huskylens.writeAlgorithm(ALGORITHM_OBJECT_TRACKING); // look for green light
-    dfDrive.control(0, 0);                                 // stop
+    dfDrive.control(0, 0);                               // stop
     Serial.println(F("Transitionning to RED_LIGHT"));
     state = RED_LIGHT;
 }
@@ -145,7 +183,6 @@ int green_light_id = 1;
 bool scan_dir;
 void red_light() // light is red; wait for it to be green
 {
-    // delay(3000);
     result = getResult(&huskylens);
     if (!isResultValid(result))
         return;
@@ -159,28 +196,32 @@ void red_light() // light is red; wait for it to be green
         Serial.print(F("Target : "));
         Serial.println(target_tag);
         state = WP_SEARCH; // go and search first tag
+
+        // test motors
+        //dfDrive.test_motor_threshold(.01, 500); // calibrate min threshold
+        //dfDrive.test_motor_drift(.3, 500);
     }
 }
 
 struct Timer lost_timeout;
+int16_t angular_error;
+int16_t linear_error;
 void wp_search() // turn around and search for a target waypoint
 {
-    double scanspeed = 0;
-    long inactive_time = 1000;
-    long active_time = 150;
+    double scan_speed = 0;
 
     if (millis() % (inactive_time + active_time) > inactive_time)
     {
-        scanspeed = 1;
+        scan_speed = active_scan_speed;
     }
 
     if (scan_dir)
     {
-        dfDrive.control(0, -scanspeed);
+        dfDrive.control(0, scan_speed);
     }
     else
     {
-        dfDrive.control(0, scanspeed);
+        dfDrive.control(0, -scan_speed);
     }
 
     result = getResult(&huskylens);
@@ -191,10 +232,16 @@ void wp_search() // turn around and search for a target waypoint
     {
         scan_dir = get_side(result); // remember last side the target was on
 
-        set_timer_start(&lost_timeout);      // set timer for timeout
-        set_timer_delay(&lost_timeout, 100); // timeout waits 100ms before image is considered lost
+        set_timer_start(&lost_timeout);                     // set timer for timeout
+        set_timer_delay(&lost_timeout, lost_timeout_delay); // timeout waits 100ms before image is considered lost
 
         dfDrive.control(0, 0);
+
+        // reset errors
+        angular_PID.reset();
+        linear_PID.reset();
+        angular_error = 0;
+        linear_error = 0;
 
         Serial.println(F("Transitionning to WP_MOVE"));
         Serial.print(F("Target : "));
@@ -206,33 +253,37 @@ void wp_search() // turn around and search for a target waypoint
 void wp_move() // move towards the waypoint until reached or lost
 {
     result = getResult(&huskylens);
-    if (!isResultValid(result))
-    {
-        if (hasDelayPassed(lost_timeout)) // abort move if timeout is reached
-        {
-            dfDrive.control(0, 0);
-            Serial.println(F("Timeout - lost target"));
-            Serial.println(F("Transitionning to WP_SEARCH"));
-            state = WP_SEARCH;
-        }
-        return;
-    }
-
-    if (getResultID(result) == target_tag)
+    if (isResultValid(result) && getResultID(result) == target_tag)
     {
         scan_dir = get_side(result); // remember last side the target was on
 
         set_timer_start(&lost_timeout); // reset timeout
 
-        advance(result); // move toward target
+        // advance(result); // move toward target
+        linear_error = get_linear_error(result);
+        angular_error = get_angular_error(result);
 
-        if (is_in_range(result, target_height, 5))
+        if (is_close(result, target_height, target_height_margin))
         {
             dfDrive.control(0, 0);
             Serial.println(F("Transitionning to WP_REACHED"));
             state = WP_REACHED;
+            return;
         }
     }
+    else
+    {
+        angular_PID.reset();
+        linear_PID.reset();
+        if (hasDelayPassed(lost_timeout)) // abort move if timeout is reached
+        {
+            Serial.println(F("Timeout - lost target"));
+            Serial.println(F("Transitionning to WP_SEARCH"));
+            state = WP_SEARCH;
+        }
+    }
+    // update
+    update_move(angular_error, linear_error);
 }
 
 void wp_reached() // reached wapypoint;  select new waypoint or finish race
@@ -241,9 +292,17 @@ void wp_reached() // reached wapypoint;  select new waypoint or finish race
     Serial.print(target_tag);
     Serial.println(F("]"));
 
-    int last_tag = 5; // tag that indicates race end
+
     if (target_tag < last_tag)
     {
+        waypoint_buzzer.set_frequency(900);
+        waypoint_buzzer.set_dutycycle(.5);
+        delay(250);
+        waypoint_buzzer.set_frequency(1000);
+        waypoint_buzzer.set_dutycycle(.5);
+        delay(400);
+        waypoint_buzzer.set_dutycycle(0.0);
+        
         target_tag++; // increment tag id
         Serial.print(F("New target ["));
         Serial.print(target_tag);
@@ -262,11 +321,38 @@ void wp_reached() // reached wapypoint;  select new waypoint or finish race
 void finish() // celebrate and look for another red light
 {
     Serial.println(F("Wooh we made it!"));
-    /*rick_setup(); // run once
-    while (1)
-    {
-        rick_loop();
-    }*/
+    dfDrive.control(0, 1);
+    waypoint_buzzer.set_frequency(1000);
+    waypoint_buzzer.set_dutycycle(.5);
+    delay(200);
+    waypoint_buzzer.set_frequency(0);
+    waypoint_buzzer.set_dutycycle(.5);
+    delay(100);
+    waypoint_buzzer.set_frequency(1000);
+    waypoint_buzzer.set_dutycycle(.5);
+    delay(200);
+    waypoint_buzzer.set_frequency(0);
+    waypoint_buzzer.set_dutycycle(.5);
+    delay(100);
+    waypoint_buzzer.set_frequency(1000);
+    waypoint_buzzer.set_dutycycle(.5);
+    delay(200);
+    waypoint_buzzer.set_frequency(0);
+    waypoint_buzzer.set_dutycycle(.5);
+    dfDrive.control(0, -1);
+    delay(100);
+    waypoint_buzzer.set_frequency(900);
+    waypoint_buzzer.set_dutycycle(.5);
+    delay(600);
+    waypoint_buzzer.set_frequency(0);
+    waypoint_buzzer.set_dutycycle(.5);
+    delay(100);
+    waypoint_buzzer.set_frequency(1000);
+    waypoint_buzzer.set_dutycycle(.5);
+    delay(1200);
+    waypoint_buzzer.set_dutycycle(0.0);
+    dfDrive.control(0, 0);
+
     state = RACE_INIT;
 }
 
@@ -290,11 +376,22 @@ void setup()
     }
     Serial.println(F("huskylens OK"));
 
+    // init buzzer pin
+    waypoint_buzzer.set_frequency(900);
+    waypoint_buzzer.set_dutycycle(.5);
+    delay(250);
+    waypoint_buzzer.set_frequency(1000);
+    waypoint_buzzer.set_dutycycle(.5);
+    delay(400);
+    waypoint_buzzer.set_dutycycle(0.0);
+
+    Serial.println(F("Transitionning to RACE_INIT"));
     state = RACE_INIT;
 }
 
 void loop()
 {
+    // delay(100);
     switch (state)
     {
     case RACE_INIT:

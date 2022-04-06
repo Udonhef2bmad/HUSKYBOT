@@ -68,9 +68,9 @@ bool get_side(HUSKYLENSResult result)
     return (result.xCenter > xCenter);
 }
 
-bool is_close(HUSKYLENSResult result, int16_t target_height)
+bool is_close(HUSKYLENSResult result, int16_t target_height, int16_t offset)
 {
-    return (result.height >= target_height);
+    return (result.height + offset > target_height);
 }
 
 bool is_in_range(HUSKYLENSResult result, int16_t target_height, int16_t offset)
@@ -81,9 +81,4 @@ bool is_in_range(HUSKYLENSResult result, int16_t target_height, int16_t offset)
 bool is_centered(HUSKYLENSResult result, int16_t offset)
 {
     return (xCenter - offset <= result.xCenter && result.xCenter <= xCenter + offset);
-}
-
-bool get_last_dir(HUSKYLENSResult result)
-{
-    return (result.xCenter <= xCenter);
 }

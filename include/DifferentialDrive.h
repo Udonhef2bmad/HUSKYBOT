@@ -15,7 +15,9 @@ public:
         HW_motor right_motor);
 
     void control(double linear, double angular);
-
+    void test_motor_threshold(double step, long ms_delay);
+    void test_motor_drift(double speed, long ms_delay);
+    
 private:
     HW_motor left_motor_;
     HW_motor right_motor_;

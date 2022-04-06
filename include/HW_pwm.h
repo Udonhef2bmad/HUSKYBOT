@@ -7,6 +7,7 @@ class HW_pwm
 {
 public:
     void set_dutycycle(double normalized_dutycycle);
+    void set_frequency(double frequency);
 
     HW_pwm(
         char pin,

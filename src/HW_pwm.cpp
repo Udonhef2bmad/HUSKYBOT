@@ -13,6 +13,11 @@ HW_pwm::HW_pwm(
     set_dutycycle((uint32_t) 0); //init with 0 dutycycle
 }
 
+void HW_pwm::set_frequency(double frequency)
+{
+    ledcSetup(channel_, frequency, resolution_);
+}
+
 // set dutycyle using a normalized double [0:1]
 void HW_pwm::set_dutycycle(double normalized_dutycycle)
 {
